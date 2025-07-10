@@ -97,6 +97,16 @@ async function run() {
       }
     });
 
+    app.get("/profiles", async (req, res) => {
+      try {
+        const profiles = await ProfileCollection.find().toArray();
+        res.json(profiles);
+      } catch (error) {
+        console.error("Failed to fetch profiles", error);
+        res.status(500).json({ error: "Failed to fetch profiles" });
+      }
+    });
+
     // Example POST route to insert data into MongoDB
     app.post("/profile", async (req, res) => {
       console.log(req.body); // Log the incoming data
@@ -112,14 +122,19 @@ async function run() {
       }
     });
 
-    // GET all profiles (limit 6 for premium)
+    // GET /premium-profiles?order=asc&limit=6
     app.get("/premium-profiles", async (req, res) => {
       try {
         const order = req.query.order === "desc" ? -1 : 1;
-        const profiles = await ProfileCollection.find()
-          .sort({ age: order })
-          .limit(6)
-          .toArray();
+        const limit = parseInt(req.query.limit);
+
+        let cursor = ProfileCollection.find().sort({ age: order });
+
+        if (!isNaN(limit) && limit > 0) {
+          cursor = cursor.limit(limit);
+        }
+
+        const profiles = await cursor.toArray();
         res.json(profiles);
       } catch (err) {
         res.status(500).json({ error: "Failed to fetch profiles" });
