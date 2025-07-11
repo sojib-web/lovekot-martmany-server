@@ -47,17 +47,14 @@ async function run() {
     // POST: Create Stripe Payment Intent
     app.post("/create-payment-intent", async (req, res) => {
       const { amount } = req.body;
-
       try {
         const paymentIntent = await stripe.paymentIntents.create({
-          amount: amount * 100, // Stripe uses cents
+          amount: amount * 100,
           currency: "usd",
           payment_method_types: ["card"],
         });
 
-        res.send({
-          clientSecret: paymentIntent.client_secret,
-        });
+        res.send({ clientSecret: paymentIntent.client_secret });
       } catch (error) {
         console.error("Stripe error:", error);
         res.status(500).json({ error: "Stripe payment failed" });
@@ -65,33 +62,47 @@ async function run() {
     });
 
     // POST: Save contact requests
-    app.post("/contact-requests", async (req, res) => {
-      try {
-        const { biodataId, userEmail, transactionId, status } = req.body;
 
-        if (!biodataId || !userEmail || !transactionId) {
-          return res.status(400).json({ message: "Missing required fields" });
+    app.post("/contact-requests", async (req, res) => {
+      const { userEmail, biodataId, transactionId } = req.body;
+
+      try {
+        // Convert string to ObjectId if needed
+        const profileDoc = await ProfileCollection.findOne({
+          _id: new ObjectId(biodataId),
+        });
+
+        if (!profileDoc) {
+          return res.status(404).json({ error: "Biodata not found" });
         }
 
         const newRequest = {
-          biodataId,
           userEmail,
-          status: status || "pending",
+          biodataId: profileDoc.biodataId,
           transactionId,
+          status: "pending",
+          name: profileDoc.name || "N/A",
+          mobileNumber: profileDoc.mobileNumber || "N/A",
+          contactEmail: profileDoc.contactEmail || "N/A",
           requestedAt: new Date(),
         };
 
         const result = await ContactRequestCollection.insertOne(newRequest);
-
-        res.status(201).json({
-          message: "Contact request submitted",
-          insertedId: result.insertedId,
-        });
-      } catch (error) {
-        console.error("Error saving contact request:", error);
-        res.status(500).json({ message: "Server error" });
+        res.json(result);
+      } catch (err) {
+        console.error("❌ Failed to insert contact request:", err);
+        res.status(500).json({ error: "Failed to insert request" });
       }
     });
+
+    // Express.js উদাহরণ
+    // app.get("/contact-requests/:email", async (req, res) => {
+    //   const email = req.params.email;
+    //   const requests = await ContactRequestCollection.find({
+    //     userEmail: email,
+    //   });
+    //   res.send(requests);
+    // });
 
     // GET: All success stories
     app.get("/api/success-stories", async (req, res) => {
@@ -129,6 +140,9 @@ async function run() {
       const email = req.params.email;
 
       try {
+        const profiles = await ProfileCollection.find({}).toArray();
+        console.log("Profiles in DB:", profiles);
+
         const biodata = await ProfileCollection.findOne({
           contactEmail: email,
         });
@@ -283,6 +297,16 @@ async function run() {
       }
     });
 
+    app.get("/biodata-by-id/:id", async (req, res) => {
+      const id = parseInt(req.params.id);
+      try {
+        const result = await ProfileCollection.findOne({ biodataId: id });
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ error: "Failed to fetch biodata by ID" });
+      }
+    });
+
     // GET: Get premium profiles sorted by age with optional limit
     app.get("/premium-profiles", async (req, res) => {
       try {
@@ -378,6 +402,59 @@ async function run() {
         res
           .status(500)
           .json({ message: "Failed to request premium", error: err });
+      }
+    });
+
+    // ✅ GET: Get contact requests for logged-in user
+    app.get("/contact-requests/:email", async (req, res) => {
+      const userEmail = req.params.email;
+
+      try {
+        const requests = await ContactRequestCollection.aggregate([
+          { $match: { userEmail } },
+          {
+            $lookup: {
+              from: "profile", // তোমার প্রোফাইল কালেকশন নাম
+              localField: "biodataId", // contact_requests এ যে biodataId আছে (eg: 21)
+              foreignField: "biodataId", // profile এ সেই ফিল্ড (eg: 21)
+              as: "profileData",
+            },
+          },
+          {
+            $unwind: { path: "$profileData", preserveNullAndEmptyArrays: true },
+          },
+          {
+            $project: {
+              _id: 1,
+              biodataId: 1, // এটা আসবে eg: 21
+              status: 1,
+              name: "$profileData.name",
+              mobileNumber: "$profileData.mobileNumber",
+              contactEmail: "$profileData.contactEmail",
+            },
+          },
+        ]).toArray();
+
+        res.json(requests);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to fetch contact requests" });
+      }
+    });
+
+    // ✅ DELETE: Delete a contact request
+    app.delete("/contact-requests/:id", async (req, res) => {
+      const id = req.params.id;
+
+      try {
+        const result = await ContactRequestCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        res.send(result);
+      } catch (error) {
+        console.error("❌ Failed to delete contact request:", error);
+        res.status(500).json({ error: "Failed to delete contact request" });
       }
     });
 
