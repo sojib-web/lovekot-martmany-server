@@ -3,7 +3,7 @@ require("dotenv").config(); // Load environment variables
 
 const express = require("express");
 const cors = require("cors");
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const stripe = require("stripe")(process.env.PAYMENT_GATEWAY_KEY);
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -64,12 +64,11 @@ async function run() {
       }
     });
 
-    // Inside your Express app setup file, e.g. index.js or server.js
+    // POST: Save contact requests
     app.post("/contact-requests", async (req, res) => {
       try {
         const { biodataId, userEmail, transactionId, status } = req.body;
 
-        // Validate required fields
         if (!biodataId || !userEmail || !transactionId) {
           return res.status(400).json({ message: "Missing required fields" });
         }
@@ -77,7 +76,7 @@ async function run() {
         const newRequest = {
           biodataId,
           userEmail,
-          status: status || "pending", // default to pending if not provided
+          status: status || "pending",
           transactionId,
           requestedAt: new Date(),
         };
@@ -94,7 +93,7 @@ async function run() {
       }
     });
 
-    // Get all success stories
+    // GET: All success stories
     app.get("/api/success-stories", async (req, res) => {
       try {
         const successStories = await SuccessStories.find()
@@ -110,7 +109,7 @@ async function run() {
       }
     });
 
-    // Get user by email
+    // GET: Get user by email
     app.get("/users/:email", async (req, res) => {
       const email = req.params.email;
       try {
@@ -125,7 +124,27 @@ async function run() {
       }
     });
 
-    // Create new user
+    // GET: Get biodata by contact email (added missing route)
+    app.get("/profile/:email", async (req, res) => {
+      const email = req.params.email;
+
+      try {
+        const biodata = await ProfileCollection.findOne({
+          contactEmail: email,
+        });
+
+        if (!biodata) {
+          return res.status(404).json({ message: "Biodata not found" });
+        }
+
+        res.json(biodata);
+      } catch (error) {
+        console.error("Error fetching biodata by email:", error);
+        res.status(500).json({ error: "Server error" });
+      }
+    });
+
+    // POST: Create new user
     app.post("/users", async (req, res) => {
       try {
         console.log("📥 Incoming user data:", req.body);
@@ -150,7 +169,7 @@ async function run() {
       }
     });
 
-    // Create a new success story
+    // POST: Create success story
     app.post("/api/success-stories", async (req, res) => {
       try {
         const { coupleImage, marriageDate, rating, successStory } = req.body;
@@ -188,7 +207,7 @@ async function run() {
       }
     });
 
-    // Get all profiles
+    // GET: Get all profiles
     app.get("/profiles", async (req, res) => {
       try {
         const profiles = await ProfileCollection.find().toArray();
@@ -199,37 +218,33 @@ async function run() {
       }
     });
 
-    // Insert a profile
+    // POST: Create or Update biodata (assign biodataId automatically)
     app.post("/profile", async (req, res) => {
-      console.log(req.body);
       try {
         const data = req.body;
+
+        const lastData = await ProfileCollection.find()
+          .sort({ biodataId: -1 })
+          .limit(1)
+          .toArray();
+        const lastId = lastData[0]?.biodataId || 0;
+        const newBiodataId = lastId + 1;
+
+        data.biodataId = newBiodataId;
+
         const result = await ProfileCollection.insertOne(data);
         res.status(201).json({
-          message: "✅ Data inserted successfully",
+          message: "✅ Biodata created successfully",
           insertedId: result.insertedId,
+          biodataId: newBiodataId,
         });
       } catch (error) {
-        res.status(500).json({ message: "❌ Failed to insert data", error });
+        console.error("❌ Error inserting biodata:", error);
+        res.status(500).json({ message: "Failed to insert biodata" });
       }
     });
 
-    // Get single biodata by id
-    app.get("/biodata/:id", async (req, res) => {
-      const id = req.params.id;
-      try {
-        const biodata = await ProfileCollection.findOne({ id: Number(id) });
-        if (!biodata) {
-          return res.status(404).json({ message: "Biodata not found" });
-        }
-        res.json(biodata);
-      } catch (err) {
-        console.error("Error fetching biodata:", err);
-        res.status(500).json({ error: "Internal Server Error" });
-      }
-    });
-
-    // Get , limited to 3
+    // GET: Get biodata filtered by type (limit 3)
     app.get("/biodata", async (req, res) => {
       try {
         const { type } = req.query;
@@ -246,7 +261,29 @@ async function run() {
       }
     });
 
-    // Get premium profiles sorted and limited
+    // GET: Get biodata by id
+    app.get("/biodata/:id", async (req, res) => {
+      const id = req.params.id;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ message: "Invalid biodata id" });
+      }
+
+      try {
+        const biodata = await ProfileCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!biodata) {
+          return res.status(404).json({ message: "Biodata not found" });
+        }
+        res.json(biodata);
+      } catch (err) {
+        console.error("Error fetching biodata:", err);
+        res.status(500).json({ error: "Internal Server Error" });
+      }
+    });
+
+    // GET: Get premium profiles sorted by age with optional limit
     app.get("/premium-profiles", async (req, res) => {
       try {
         const order = req.query.order === "desc" ? -1 : 1;
@@ -265,7 +302,7 @@ async function run() {
       }
     });
 
-    // Success counter API
+    // GET: Success counter data
     app.get("/api/success-counter", async (req, res) => {
       try {
         const totalProfiles = await ProfileCollection.estimatedDocumentCount();
@@ -290,7 +327,7 @@ async function run() {
       }
     });
 
-    // *** NEW: POST /favourites - add biodata to favourites ***
+    // POST: Add biodata to favourites
     app.post("/favourites", async (req, res) => {
       try {
         const { biodataId, userEmail } = req.body;
@@ -301,7 +338,6 @@ async function run() {
           });
         }
 
-        // Check if already in favourites
         const alreadyFav = await FavouritesCollection.findOne({
           biodataId,
           userEmail,
@@ -313,7 +349,6 @@ async function run() {
           });
         }
 
-        // Insert into favourites
         const result = await FavouritesCollection.insertOne({
           biodataId,
           userEmail,
@@ -330,7 +365,23 @@ async function run() {
       }
     });
 
-    // Start server
+    // PATCH: Request biodata to be premium (fix variable and ObjectId)
+    app.patch("/profile/premium-request/:id", async (req, res) => {
+      const id = req.params.id;
+      try {
+        const result = await ProfileCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { premiumRequested: true } }
+        );
+        res.send(result);
+      } catch (err) {
+        res
+          .status(500)
+          .json({ message: "Failed to request premium", error: err });
+      }
+    });
+
+    // Start the server
     app.listen(PORT, () => {
       console.log(`🚀 Server running at http://localhost:${PORT}`);
     });
