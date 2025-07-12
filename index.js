@@ -64,10 +64,9 @@ async function run() {
     // POST: Save contact requests
 
     app.post("/contact-requests", async (req, res) => {
-      const { userEmail, biodataId, transactionId } = req.body;
+      const { userEmail, biodataId, transactionId, amountPaid } = req.body;
 
       try {
-        // Convert string to ObjectId if needed
         const profileDoc = await ProfileCollection.findOne({
           _id: new ObjectId(biodataId),
         });
@@ -80,7 +79,8 @@ async function run() {
           userEmail,
           biodataId: profileDoc.biodataId,
           transactionId,
-          status: "pending",
+          amountPaid: amountPaid || 0, // include this!
+          status: "approved", // or pending
           name: profileDoc.name || "N/A",
           mobileNumber: profileDoc.mobileNumber || "N/A",
           contactEmail: profileDoc.contactEmail || "N/A",
@@ -353,39 +353,33 @@ async function run() {
 
     // POST: Add biodata to favourites
     app.post("/favourites", async (req, res) => {
+      const {
+        biodataId,
+        biodataUniqueId,
+        name,
+        permanentAddress,
+        occupation,
+        userEmail,
+      } = req.body;
+
       try {
-        const { biodataId, userEmail } = req.body;
-
-        if (!biodataId || !userEmail) {
-          return res.status(400).json({
-            message: "Both biodataId and userEmail are required",
-          });
-        }
-
-        const alreadyFav = await FavouritesCollection.findOne({
-          biodataId,
-          userEmail,
-        });
-
-        if (alreadyFav) {
-          return res.status(400).json({
-            message: "This biodata is already in your favourites",
-          });
-        }
-
         const result = await FavouritesCollection.insertOne({
-          biodataId,
+          biodataUniqueId,
+          name,
+          permanentAddress,
+          occupation,
           userEmail,
-          addedAt: new Date(),
+          createdAt: new Date(),
         });
 
         res.status(201).json({
-          message: "Successfully added to favourites",
+          message: "Added to favourites",
           insertedId: result.insertedId,
         });
       } catch (error) {
-        console.error("Error adding favourite:", error);
-        res.status(500).json({ message: "Server error" });
+        res
+          .status(500)
+          .json({ message: "Error saving favourite", error: error.message });
       }
     });
 
@@ -455,6 +449,62 @@ async function run() {
       } catch (error) {
         console.error("❌ Failed to delete contact request:", error);
         res.status(500).json({ error: "Failed to delete contact request" });
+      }
+    });
+
+    app.get("/favourites", async (req, res) => {
+      const email = req.query.email;
+      if (!email) return res.status(400).json({ message: "Email required" });
+
+      const favourites = await FavouritesCollection.find({
+        userEmail: email,
+      }).toArray();
+      res.send(favourites);
+    });
+    app.delete("/favourites/:id", async (req, res) => {
+      const id = req.params.id;
+      const result = await FavouritesCollection.deleteOne({
+        _id: new ObjectId(id),
+      });
+      res.send(result);
+    });
+
+    // GET /admin-dashboard/stats
+    app.get("/admin-dashboard/stats", async (req, res) => {
+      try {
+        const totalBiodata = await ProfileCollection.countDocuments();
+        const maleCount = await ProfileCollection.countDocuments({
+          biodataType: "Male",
+        });
+        const femaleCount = await ProfileCollection.countDocuments({
+          biodataType: "Female",
+        });
+        const premiumCount = await ProfileCollection.countDocuments({
+          premiumRequested: true,
+        });
+
+        const requests = await ContactRequestCollection.find({
+          status: "approved",
+        }).toArray();
+
+        const totalRevenue = requests.reduce(
+          (sum, req) => sum + (req.amountPaid || 0),
+          0
+        );
+
+        res.json({
+          totalBiodata,
+          maleCount,
+          femaleCount,
+          premiumCount,
+          totalRevenue,
+        });
+      } catch (err) {
+        console.error("❌ Error fetching stats:", err);
+        res.status(500).json({
+          message: "Error fetching admin stats",
+          error: err.message,
+        });
       }
     });
 
