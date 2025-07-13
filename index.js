@@ -3,16 +3,29 @@ require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
+const path = require("path");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const stripe = require("stripe")(process.env.PAYMENT_GATEWAY_KEY);
+const admin = require("firebase-admin");
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(cors());
 app.use(express.json());
 
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.fhhak4d.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
+// Firebase Admin initialization
+const serviceAccount = require(path.join(
+  __dirname,
+  "config",
+  "loveknot-verifyFBToken.json"
+));
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
 
+// MongoDB connection
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.fhhak4d.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -21,11 +34,32 @@ const client = new MongoClient(uri, {
   },
 });
 
+// Collections
 let SuccessStories,
   ProfileCollection,
   UsersCollection,
   FavouritesCollection,
   ContactRequestCollection;
+
+// Middleware: Firebase Token Verification
+const verifyFBToken = async (req, res, next) => {
+  const authorization = req.headers.authorization;
+  if (!authorization) {
+    console.log("⛔ No Authorization header");
+    return res.status(401).send({ message: "Unauthorized" });
+  }
+
+  const token = authorization.split(" ")[1];
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    console.log("✅ Token verified for uid:", decoded.uid);
+    req.decoded = decoded;
+    next();
+  } catch (error) {
+    console.error("❌ Token verification failed:", error.message);
+    return res.status(401).send({ message: "Unauthorized" });
+  }
+};
 
 async function run() {
   try {
@@ -44,13 +78,17 @@ async function run() {
     // --- User Routes ---
 
     app.post("/users", async (req, res) => {
+      console.log("POST /users called with body:", req.body);
       const userData = req.body;
       const existingUser = await UsersCollection.findOne({
         email: userData.email,
       });
-      if (existingUser)
+      if (existingUser) {
+        console.log(`User already exists: ${userData.email}`);
         return res.status(400).json({ message: "User already exists" });
+      }
       const result = await UsersCollection.insertOne(userData);
+      console.log("User created with id:", result.insertedId);
       res.status(201).json({
         message: "✅ User created successfully",
         insertedId: result.insertedId,
@@ -58,6 +96,7 @@ async function run() {
     });
 
     app.get("/users", async (req, res) => {
+      console.log("GET /users called with search query:", req.query.search);
       const search = req.query.search;
       const query = search ? { name: { $regex: search, $options: "i" } } : {};
 
@@ -76,26 +115,39 @@ async function run() {
         })
       );
 
+      console.log(`Sending ${updatedUsers.length} users`);
       res.send(updatedUsers);
     });
 
-    app.get("/users/:email", async (req, res) => {
+    // GET /users/role/:email
+    // GET /users/role/:email
+    app.get("/users/role/:email", async (req, res) => {
       const email = req.params.email;
       const user = await UsersCollection.findOne({ email });
-      if (!user) return res.status(404).json({ message: "User not found" });
+      res.send({ role: user?.role });
+    });
+
+    app.get("/users/:email", async (req, res) => {
+      console.log("GET /users/:email called with email:", req.params.email);
+      const email = req.params.email;
+      const user = await UsersCollection.findOne({ email });
+      if (!user) {
+        console.log(`User not found: ${email}`);
+        return res.status(404).json({ message: "User not found" });
+      }
       res.json(user);
     });
 
-    // PATCH /users/:id/make-admin
-    app.patch("/users/:id/make-admin", async (req, res) => {
+    // PATCH /users/:id/make-admin  --> **Protected**
+    app.patch("/users/:id/make-admin", verifyFBToken, async (req, res) => {
       const id = req.params.id;
-
+      console.log(`PATCH /users/${id}/make-admin called`);
       try {
         const result = await UsersCollection.updateOne(
           { _id: new ObjectId(id) },
           { $set: { role: "admin" } }
         );
-
+        console.log("User role updated:", result.modifiedCount);
         res.json({
           message: "User role updated to admin",
           modifiedCount: result.modifiedCount,
@@ -106,20 +158,29 @@ async function run() {
       }
     });
 
-    app.patch("/users/:id/make-premium", async (req, res) => {
+    // PATCH /users/:id/make-premium  --> **Protected**
+    app.patch("/users/:id/make-premium", verifyFBToken, async (req, res) => {
       const userId = req.params.id;
+      console.log(`PATCH /users/${userId}/make-premium called`);
       try {
         const user = await UsersCollection.findOne({
           _id: new ObjectId(userId),
         });
-        if (!user) return res.status(404).json({ message: "User not found" });
+        if (!user) {
+          console.log(`User not found: ${userId}`);
+          return res.status(404).json({ message: "User not found" });
+        }
         const profile = await ProfileCollection.findOne({
           contactEmail: user.email,
         });
-        if (!profile || profile.premiumRequested !== true)
-          return res
-            .status(400)
-            .json({ message: "User's profile has not requested premium" });
+        if (!profile || profile.premiumRequested !== true) {
+          console.log(
+            `Premium not requested or profile missing for user: ${user.email}`
+          );
+          return res.status(400).json({
+            message: "User's profile has not requested premium",
+          });
+        }
 
         await UsersCollection.updateOne(
           { _id: new ObjectId(userId) },
@@ -130,6 +191,7 @@ async function run() {
           { $set: { premiumApproved: true } }
         );
 
+        console.log(`User ${user.email} made premium successfully`);
         res.json({ message: "User has been made premium successfully" });
       } catch (err) {
         console.error("🔥 Error making user premium:", err);
@@ -139,7 +201,9 @@ async function run() {
 
     // --- Profile Routes ---
 
-    app.post("/profile", async (req, res) => {
+    // POST /profile  --> **Protected**
+    app.post("/profile", verifyFBToken, async (req, res) => {
+      console.log("POST /profile called with data:", req.body);
       const data = req.body;
       const lastData = await ProfileCollection.find()
         .sort({ biodataId: -1 })
@@ -148,6 +212,7 @@ async function run() {
       const lastId = lastData[0]?.biodataId || 0;
       data.biodataId = lastId + 1;
       const result = await ProfileCollection.insertOne(data);
+      console.log("Biodata created with id:", result.insertedId);
       res.status(201).json({
         message: "✅ Biodata created successfully",
         insertedId: result.insertedId,
@@ -155,29 +220,41 @@ async function run() {
       });
     });
 
-    app.patch("/profile/premium-request/:id", async (req, res) => {
-      const id = req.params.id;
-      const result = await ProfileCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { premiumRequested: true } }
-      );
-      res.send(result);
-    });
+    // PATCH /profile/premium-request/:id  --> **Protected**
+    app.patch(
+      "/profile/premium-request/:id",
+      verifyFBToken,
+      async (req, res) => {
+        const id = req.params.id;
+        console.log(`PATCH /profile/premium-request/${id} called`);
+        const result = await ProfileCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { premiumRequested: true } }
+        );
+        console.log("Premium requested flag updated:", result.modifiedCount);
+        res.send(result);
+      }
+    );
 
     app.get("/profile/:email", async (req, res) => {
+      console.log("GET /profile/:email called with email:", req.params.email);
       const email = req.params.email;
       const biodata = await ProfileCollection.findOne({ contactEmail: email });
-      if (!biodata)
+      if (!biodata) {
+        console.log(`Biodata not found for email: ${email}`);
         return res.status(404).json({ message: "Biodata not found" });
+      }
       res.json(biodata);
     });
 
     app.get("/profiles", async (req, res) => {
+      console.log("GET /profiles called");
       const profiles = await ProfileCollection.find().toArray();
       res.json(profiles);
     });
 
     app.get("/biodata", async (req, res) => {
+      console.log("GET /biodata called with query:", req.query);
       const { type } = req.query;
       const query = type
         ? { type: { $regex: new RegExp(`^${type}$`, "i") } }
@@ -187,24 +264,31 @@ async function run() {
     });
 
     app.get("/biodata/:id", async (req, res) => {
+      console.log("GET /biodata/:id called with id:", req.params.id);
       const id = req.params.id;
-      if (!ObjectId.isValid(id))
+      if (!ObjectId.isValid(id)) {
+        console.log("Invalid biodata id:", id);
         return res.status(400).json({ message: "Invalid biodata id" });
+      }
       const biodata = await ProfileCollection.findOne({
         _id: new ObjectId(id),
       });
-      if (!biodata)
+      if (!biodata) {
+        console.log(`Biodata not found for id: ${id}`);
         return res.status(404).json({ message: "Biodata not found" });
+      }
       res.json(biodata);
     });
 
     app.get("/biodata-by-id/:id", async (req, res) => {
+      console.log("GET /biodata-by-id/:id called with id:", req.params.id);
       const id = parseInt(req.params.id);
       const result = await ProfileCollection.findOne({ biodataId: id });
       res.send(result);
     });
 
     app.get("/premium-profiles", async (req, res) => {
+      console.log("GET /premium-profiles called with query:", req.query);
       const order = req.query.order === "desc" ? -1 : 1;
       const limit = parseInt(req.query.limit);
       let cursor = ProfileCollection.find().sort({ age: order });
@@ -215,7 +299,9 @@ async function run() {
 
     // --- Dashboard and Admin Stats ---
 
-    app.get("/dashboard/approvedPremium", async (req, res) => {
+    // GET /dashboard/approvedPremium  --> **Protected**
+    app.get("/dashboard/approvedPremium", verifyFBToken, async (req, res) => {
+      console.log("GET /dashboard/approvedPremium called");
       try {
         const result = await ProfileCollection.aggregate([
           { $match: { premiumRequested: true } },
@@ -244,7 +330,9 @@ async function run() {
       }
     });
 
-    app.get("/admin-dashboard/stats", async (req, res) => {
+    // GET /admin-dashboard/stats  --> **Protected**
+    app.get("/admin-dashboard/stats", verifyFBToken, async (req, res) => {
+      console.log("GET /admin-dashboard/stats called");
       try {
         const totalBiodata = await ProfileCollection.countDocuments();
         const maleCount = await ProfileCollection.countDocuments({
@@ -271,6 +359,7 @@ async function run() {
           totalRevenue,
         });
       } catch (err) {
+        console.error("❌ Error fetching admin stats:", err.message);
         res
           .status(500)
           .json({ message: "Error fetching admin stats", error: err.message });
@@ -279,13 +368,20 @@ async function run() {
 
     // --- Contact Requests ---
 
-    app.post("/contact-requests", async (req, res) => {
+    // POST /contact-requests  --> **Protected**
+    app.post("/contact-requests", verifyFBToken, async (req, res) => {
+      console.log("POST /contact-requests called with body:", req.body);
       const { userEmail, biodataId, transactionId, amountPaid } = req.body;
       const profileDoc = await ProfileCollection.findOne({
         _id: new ObjectId(biodataId),
       });
-      if (!profileDoc)
+      if (!profileDoc) {
+        console.log(
+          "Biodata not found for contact request, biodataId:",
+          biodataId
+        );
         return res.status(404).json({ error: "Biodata not found" });
+      }
 
       const newRequest = {
         userEmail,
@@ -300,10 +396,16 @@ async function run() {
       };
 
       const result = await ContactRequestCollection.insertOne(newRequest);
+      console.log("Contact request created with id:", result.insertedId);
       res.json(result);
     });
 
-    app.get("/contact-requests/:email", async (req, res) => {
+    // GET /contact-requests/:email  --> **Protected**
+    app.get("/contact-requests/:email", verifyFBToken, async (req, res) => {
+      console.log(
+        "GET /contact-requests/:email called with email:",
+        req.params.email
+      );
       const userEmail = req.params.email;
       const requests = await ContactRequestCollection.aggregate([
         { $match: { userEmail } },
@@ -330,17 +432,25 @@ async function run() {
       res.json(requests);
     });
 
-    app.delete("/contact-requests/:id", async (req, res) => {
+    // DELETE /contact-requests/:id  --> **Protected**
+    app.delete("/contact-requests/:id", verifyFBToken, async (req, res) => {
+      console.log(
+        "DELETE /contact-requests/:id called with id:",
+        req.params.id
+      );
       const id = req.params.id;
       const result = await ContactRequestCollection.deleteOne({
         _id: new ObjectId(id),
       });
+      console.log("Contact request deleted count:", result.deletedCount);
       res.send(result);
     });
 
     // --- Favourites ---
 
-    app.post("/favourites", async (req, res) => {
+    // POST /favourites  --> **Protected**
+    app.post("/favourites", verifyFBToken, async (req, res) => {
+      console.log("POST /favourites called with body:", req.body);
       const {
         biodataId,
         biodataUniqueId,
@@ -357,32 +467,47 @@ async function run() {
         userEmail,
         createdAt: new Date(),
       });
+      console.log("Added to favourites with id:", result.insertedId);
       res.status(201).json({
         message: "Added to favourites",
         insertedId: result.insertedId,
       });
     });
 
-    app.get("/favourites", async (req, res) => {
+    // GET /favourites  --> **Protected**
+    app.get("/favourites", verifyFBToken, async (req, res) => {
+      console.log(
+        "GET /favourites called with email:",
+        req.query.email,
+        req.headers
+      );
       const email = req.query.email;
-      if (!email) return res.status(400).json({ message: "Email required" });
+      if (!email) {
+        console.log("Email query param missing");
+        return res.status(400).json({ message: "Email required" });
+      }
       const favourites = await FavouritesCollection.find({
         userEmail: email,
       }).toArray();
       res.send(favourites);
     });
 
-    app.delete("/favourites/:id", async (req, res) => {
+    // DELETE /favourites/:id  --> **Protected**
+    app.delete("/favourites/:id", verifyFBToken, async (req, res) => {
+      console.log("DELETE /favourites/:id called with id:", req.params.id);
       const id = req.params.id;
       const result = await FavouritesCollection.deleteOne({
         _id: new ObjectId(id),
       });
+      console.log("Favourite deleted count:", result.deletedCount);
       res.send(result);
     });
 
     // --- Stripe Payment Intent ---
 
-    app.post("/create-payment-intent", async (req, res) => {
+    // POST /create-payment-intent  --> **Protected** (Optional but recommended)
+    app.post("/create-payment-intent", verifyFBToken, async (req, res) => {
+      console.log("POST /create-payment-intent called with body:", req.body);
       const { amount } = req.body;
       try {
         const paymentIntent = await stripe.paymentIntents.create({
@@ -390,6 +515,7 @@ async function run() {
           currency: "usd",
           payment_method_types: ["card"],
         });
+        console.log("Stripe payment intent created");
         res.send({ clientSecret: paymentIntent.client_secret });
       } catch (err) {
         console.error("Stripe error:", err);
@@ -399,17 +525,22 @@ async function run() {
 
     // --- Success Stories ---
 
-    app.get("/api/success-stories", async (req, res) => {
+    app.get("/api/success-stories", verifyFBToken, async (req, res) => {
+      console.log("GET /api/success-stories called");
       const successStories = await SuccessStories.find()
         .sort({ marriageDate: -1 })
         .toArray();
       res.json(successStories);
     });
 
-    app.post("/api/success-stories", async (req, res) => {
+    // POST /api/success-stories  --> **Protected**
+    app.post("/api/success-stories", verifyFBToken, async (req, res) => {
+      console.log("POST /api/success-stories called with body:", req.body);
       const { coupleImage, marriageDate, rating, successStory } = req.body;
-      if (!coupleImage || !marriageDate || !rating || !successStory)
+      if (!coupleImage || !marriageDate || !rating || !successStory) {
+        console.log("Missing required fields for success story");
         return res.status(400).json({ error: "Missing required fields" });
+      }
 
       const newSuccessStory = {
         coupleImage,
@@ -420,17 +551,20 @@ async function run() {
 
       const result = await SuccessStories.insertOne(newSuccessStory);
       if (result.insertedId) {
+        console.log("Success story created with id:", result.insertedId);
         res.status(201).json({
           message: "Success story created successfully!",
           successStory: newSuccessStory,
           insertedId: result.insertedId,
         });
       } else {
+        console.log("Failed to create success story");
         res.status(500).json({ error: "Failed to create success story" });
       }
     });
 
     app.get("/api/success-counter", async (req, res) => {
+      console.log("GET /api/success-counter called");
       const totalProfiles = await ProfileCollection.estimatedDocumentCount();
       const boysCount = await ProfileCollection.countDocuments({
         type: { $regex: /^male$/i },
@@ -443,7 +577,6 @@ async function run() {
     });
 
     // --- Start Server ---
-
     app.listen(PORT, () => {
       console.log(`🚀 Server running at http://localhost:${PORT}`);
     });

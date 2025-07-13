@@ -5,3 +5,7 @@ node_modules/
 .env
 .env.local
 .env.*.local
+
+
+# Firebase credentials file (if separated)
+config/loveknot-verifyFBToken.json
