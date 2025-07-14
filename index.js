@@ -61,6 +61,22 @@ const verifyFBToken = async (req, res, next) => {
   }
 };
 
+const verifyAdmin = async (req, res, next) => {
+  const email = req.decoded?.email;
+
+  if (!email) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+
+  const user = await UsersCollection.findOne({ email });
+
+  if (user?.role !== "premium") {
+    return res.status(403).json({ message: "Forbidden: Admins only" });
+  }
+
+  next();
+};
+
 async function run() {
   try {
     await client.connect();
@@ -81,7 +97,7 @@ async function run() {
       console.log("POST /users called with body:", req.body);
       const userData = req.body;
       const existingUser = await UsersCollection.findOne({
-        email: userData.email,
+        email: userData.email.toLowerCase(),
       });
       if (existingUser) {
         console.log(`User already exists: ${userData.email}`);
@@ -120,84 +136,109 @@ async function run() {
     });
 
     // GET /users/role/:email
-    // GET /users/role/:email
     app.get("/users/role/:email", async (req, res) => {
-      const email = req.params.email;
+      const email = req.params.email.toLowerCase(); // ✅ case insensitive
+
       const user = await UsersCollection.findOne({ email });
-      res.send({ role: user?.role });
+
+      if (!user) {
+        return res.status(404).send({ role: null });
+      }
+
+      res.send({ role: user.role });
     });
 
     app.get("/users/:email", async (req, res) => {
-      console.log("GET /users/:email called with email:", req.params.email);
-      const email = req.params.email;
-      const user = await UsersCollection.findOne({ email });
-      if (!user) {
-        console.log(`User not found: ${email}`);
-        return res.status(404).json({ message: "User not found" });
+      try {
+        const email = req.params.email;
+        const user = await UsersCollection.findOne({ email });
+        if (!user) {
+          return res.status(404).json({ message: "User not found" });
+        }
+        res.json(user);
+      } catch (error) {
+        console.error("GET /users/:email error:", error);
+        res.status(500).json({ message: "Server error" });
       }
-      res.json(user);
     });
 
     // PATCH /users/:id/make-admin  --> **Protected**
-    app.patch("/users/:id/make-admin", verifyFBToken, async (req, res) => {
-      const id = req.params.id;
-      console.log(`PATCH /users/${id}/make-admin called`);
-      try {
-        const result = await UsersCollection.updateOne(
-          { _id: new ObjectId(id) },
-          { $set: { role: "admin" } }
-        );
-        console.log("User role updated:", result.modifiedCount);
-        res.json({
-          message: "User role updated to admin",
-          modifiedCount: result.modifiedCount,
-        });
-      } catch (error) {
-        console.error("❌ Error updating role:", error);
-        res.status(500).json({ message: "Failed to update role" });
+    app.patch(
+      "/users/:id/make-admin",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        const id = req.params.id;
+        console.log(`PATCH /users/${id}/make-admin called`);
+        try {
+          const result = await UsersCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: { role: "admin" } }
+          );
+          console.log("User role updated:", result.modifiedCount);
+          res.json({
+            message: "User role updated to admin",
+            modifiedCount: result.modifiedCount,
+          });
+        } catch (error) {
+          console.error("❌ Error updating role:", error);
+          res.status(500).json({ message: "Failed to update role" });
+        }
       }
-    });
+    );
 
     // PATCH /users/:id/make-premium  --> **Protected**
-    app.patch("/users/:id/make-premium", verifyFBToken, async (req, res) => {
-      const userId = req.params.id;
-      console.log(`PATCH /users/${userId}/make-premium called`);
-      try {
-        const user = await UsersCollection.findOne({
-          _id: new ObjectId(userId),
-        });
-        if (!user) {
-          console.log(`User not found: ${userId}`);
-          return res.status(404).json({ message: "User not found" });
-        }
-        const profile = await ProfileCollection.findOne({
-          contactEmail: user.email,
-        });
-        if (!profile || profile.premiumRequested !== true) {
-          console.log(
-            `Premium not requested or profile missing for user: ${user.email}`
-          );
-          return res.status(400).json({
-            message: "User's profile has not requested premium",
+    app.patch(
+      "/users/:id/make-premium",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        const userId = req.params.id;
+        console.log(`PATCH /users/${userId}/make-premium called`);
+        try {
+          const user = await UsersCollection.findOne({
+            _id: new ObjectId(userId),
           });
+          if (!user) {
+            console.log(`User not found: ${userId}`);
+            return res.status(404).json({ message: "User not found" });
+          }
+
+          // Check if user is already premium
+          if (user.role === "premium") {
+            console.log(`User ${user.email} is already premium`);
+            return res.status(400).json({ message: "User is already premium" });
+          }
+
+          const profile = await ProfileCollection.findOne({
+            contactEmail: user.email,
+          });
+          if (!profile || profile.premiumRequested !== true) {
+            console.log(
+              `Premium not requested or profile missing for user: ${user.email}`
+            );
+            return res.status(400).json({
+              message: "User's profile has not requested premium",
+            });
+          }
+
+          await UsersCollection.updateOne(
+            { _id: new ObjectId(userId) },
+            { $set: { role: "premium" } }
+          );
+          await ProfileCollection.updateOne(
+            { contactEmail: user.email },
+            { $set: { premiumApproved: true } }
+          );
+
+          console.log(`User ${user.email} made premium successfully`);
+          res.json({ message: "User has been made premium successfully" });
+        } catch (err) {
+          console.error("🔥 Error making user premium:", err);
+          res.status(500).json({ message: "Internal server error" });
         }
-
-        await UsersCollection.updateOne(
-          { _id: new ObjectId(userId) },
-          { $set: { role: "premium" } }
-        );
-        await ProfileCollection.updateOne(
-          { contactEmail: user.email },
-          { $set: { premiumApproved: true } }
-        );
-
-        console.log(`User ${user.email} made premium successfully`);
-        res.json({ message: "User has been made premium successfully" });
-      } catch (err) {
-        console.error("🔥 Error making user premium:", err);
-        res.status(500).json({ message: "Internal server error" });
       }
-    });
+    );
 
     // --- Profile Routes ---
 
@@ -264,20 +305,22 @@ async function run() {
     });
 
     app.get("/biodata/:id", async (req, res) => {
-      console.log("GET /biodata/:id called with id:", req.params.id);
-      const id = req.params.id;
-      if (!ObjectId.isValid(id)) {
-        console.log("Invalid biodata id:", id);
-        return res.status(400).json({ message: "Invalid biodata id" });
+      try {
+        const id = req.params.id;
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ message: "Invalid biodata id" });
+        }
+        const biodata = await ProfileCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!biodata) {
+          return res.status(404).json({ message: "Biodata not found" });
+        }
+        res.json(biodata);
+      } catch (error) {
+        console.error("GET /biodata/:id error:", error);
+        res.status(500).json({ message: "Server error" });
       }
-      const biodata = await ProfileCollection.findOne({
-        _id: new ObjectId(id),
-      });
-      if (!biodata) {
-        console.log(`Biodata not found for id: ${id}`);
-        return res.status(404).json({ message: "Biodata not found" });
-      }
-      res.json(biodata);
     });
 
     app.get("/biodata-by-id/:id", async (req, res) => {
@@ -287,16 +330,34 @@ async function run() {
       res.send(result);
     });
 
+    // ✅ routes/premiumProfiles.js (or inside server.js)
     app.get("/premium-profiles", async (req, res) => {
-      console.log("GET /premium-profiles called with query:", req.query);
-      const order = req.query.order === "desc" ? -1 : 1;
-      const limit = parseInt(req.query.limit);
-      let cursor = ProfileCollection.find().sort({ age: order });
-      if (!isNaN(limit) && limit > 0) cursor = cursor.limit(limit);
-      const profiles = await cursor.toArray();
-      res.json(profiles);
-    });
+      try {
+        // Get order and limit from query params
+        const order = req.query.order === "desc" ? -1 : 1; // default ascending
+        const limit = parseInt(req.query.limit) || 8;
 
+        // Query for only premium approved profiles
+        const query = { premiumApproved: true };
+
+        // If your age is stored as string, convert using aggregation pipeline
+        const result = await ProfileCollection.aggregate([
+          { $match: query },
+          {
+            $addFields: {
+              ageNum: { $toInt: "$age" }, // convert age string to int
+            },
+          },
+          { $sort: { ageNum: order } },
+          { $limit: limit },
+        ]).toArray();
+
+        res.send(result);
+      } catch (error) {
+        console.error("❌ Error fetching premium profiles:", error.message);
+        res.status(500).send({ message: "Server Error" });
+      }
+    });
     // --- Dashboard and Admin Stats ---
 
     // GET /dashboard/approvedPremium  --> **Protected**
@@ -322,7 +383,9 @@ async function run() {
               biodataId: 1,
             },
           },
-        ]).toArray();
+        ])
+          .limit(50)
+          .toArray();
         res.send(result);
       } catch (err) {
         console.error("❌ Error in approvedPremium route:", err.message);
@@ -388,7 +451,7 @@ async function run() {
         biodataId: profileDoc.biodataId,
         transactionId,
         amountPaid: amountPaid || 0,
-        status: "approved",
+        status: "pending",
         name: profileDoc.name || "N/A",
         mobileNumber: profileDoc.mobileNumber || "N/A",
         contactEmail: profileDoc.contactEmail || "N/A",
@@ -446,52 +509,66 @@ async function run() {
       res.send(result);
     });
 
-    // --- Favourites ---
+    app.get("/favourites", verifyFBToken, async (req, res) => {
+      try {
+        const email = req.query.email;
+        if (!email) {
+          return res
+            .status(400)
+            .json({ message: "Email query parameter is required" });
+        }
 
-    // POST /favourites  --> **Protected**
-    app.post("/favourites", verifyFBToken, async (req, res) => {
-      console.log("POST /favourites called with body:", req.body);
-      const {
-        biodataId,
-        biodataUniqueId,
-        name,
-        permanentAddress,
-        occupation,
-        userEmail,
-      } = req.body;
-      const result = await FavouritesCollection.insertOne({
-        biodataUniqueId,
-        name,
-        permanentAddress,
-        occupation,
-        userEmail,
-        createdAt: new Date(),
-      });
-      console.log("Added to favourites with id:", result.insertedId);
-      res.status(201).json({
-        message: "Added to favourites",
-        insertedId: result.insertedId,
-      });
+        const favourites = await FavouritesCollection.find({
+          userEmail: email,
+        }).toArray();
+        res.json(favourites);
+      } catch (error) {
+        console.error("Error fetching favourites:", error);
+        res.status(500).json({ message: "Internal server error" });
+      }
     });
 
     // GET /favourites  --> **Protected**
-    app.get("/favourites", verifyFBToken, async (req, res) => {
-      console.log(
-        "GET /favourites called with email:",
-        req.query.email,
-        req.headers
-      );
-      const email = req.query.email;
-      if (!email) {
-        console.log("Email query param missing");
-        return res.status(400).json({ message: "Email required" });
-      }
-      const favourites = await FavouritesCollection.find({
-        userEmail: email,
-      }).toArray();
-      res.send(favourites);
-    });
+    app.post("/favourites", verifyFBToken, async (req, res) => {
+      try {
+        const {
+          biodataUniqueId,
+          name,
+          permanentAddress,
+          occupation,
+          userEmail,
+        } = req.body;
+        if (!biodataUniqueId || !userEmail) {
+          return res.status(400).json({ message: "Required fields missing" });
+        }
 
+        const existing = await FavouritesCollection.findOne({
+          biodataUniqueId,
+          userEmail,
+        });
+        if (existing) {
+          return res
+            .status(400)
+            .json({ message: "Already added to favourites" });
+        }
+
+        const result = await FavouritesCollection.insertOne({
+          biodataUniqueId,
+          name,
+          permanentAddress,
+          occupation,
+          userEmail,
+          createdAt: new Date(),
+        });
+        res.status(201).json({
+          message: "Added to favourites",
+          insertedId: result.insertedId,
+        });
+      } catch (error) {
+        console.error("POST /favourites error:", error);
+        res.status(500).json({ message: "Server error" });
+      }
+    });
     // DELETE /favourites/:id  --> **Protected**
     app.delete("/favourites/:id", verifyFBToken, async (req, res) => {
       console.log("DELETE /favourites/:id called with id:", req.params.id);
@@ -525,7 +602,7 @@ async function run() {
 
     // --- Success Stories ---
 
-    app.get("/api/success-stories", verifyFBToken, async (req, res) => {
+    app.get("/api/success-stories", async (req, res) => {
       console.log("GET /api/success-stories called");
       const successStories = await SuccessStories.find()
         .sort({ marriageDate: -1 })
@@ -534,7 +611,7 @@ async function run() {
     });
 
     // POST /api/success-stories  --> **Protected**
-    app.post("/api/success-stories", verifyFBToken, async (req, res) => {
+    app.post("/api/success-stories", async (req, res) => {
       console.log("POST /api/success-stories called with body:", req.body);
       const { coupleImage, marriageDate, rating, successStory } = req.body;
       if (!coupleImage || !marriageDate || !rating || !successStory) {
@@ -563,17 +640,29 @@ async function run() {
       }
     });
 
+    // Assuming you're using Express and have ProfileCollection & SuccessStories defined
+
     app.get("/api/success-counter", async (req, res) => {
-      console.log("GET /api/success-counter called");
-      const totalProfiles = await ProfileCollection.estimatedDocumentCount();
-      const boysCount = await ProfileCollection.countDocuments({
-        type: { $regex: /^male$/i },
-      });
-      const girlsCount = await ProfileCollection.countDocuments({
-        type: { $regex: /^female$/i },
-      });
-      const marriagesCount = await SuccessStories.estimatedDocumentCount();
-      res.json({ totalProfiles, boysCount, girlsCount, marriagesCount });
+      try {
+        console.log("📊 GET /api/success-counter called");
+
+        const totalProfiles = await ProfileCollection.estimatedDocumentCount();
+
+        const boysCount = await ProfileCollection.countDocuments({
+          biodataType: { $regex: /^male$/i },
+        });
+
+        const girlsCount = await ProfileCollection.countDocuments({
+          biodataType: { $regex: /^female$/i },
+        });
+
+        const marriagesCount = await SuccessStories.estimatedDocumentCount();
+
+        res.json({ totalProfiles, boysCount, girlsCount, marriagesCount });
+      } catch (err) {
+        console.error("❌ Error in success-counter:", err.message);
+        res.status(500).json({ message: "Server Error" });
+      }
     });
 
     // --- Start Server ---
