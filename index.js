@@ -77,6 +77,31 @@ const verifyAdmin = async (req, res, next) => {
   next();
 };
 
+async function getPaginatedData(collection, req, res, query = {}) {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    // মোট ডকুমেন্টস (query দিয়ে filter দিলে filter count)
+    const total = await collection.countDocuments(query);
+
+    // ডাটা fetch
+    const data = await collection.find(query).skip(skip).limit(limit).toArray();
+
+    res.json({
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+      data,
+    });
+  } catch (error) {
+    console.error("Pagination error:", error);
+    res.status(500).json({ message: "Pagination failed" });
+  }
+}
+
 async function run() {
   try {
     await client.connect();
@@ -111,28 +136,56 @@ async function run() {
       });
     });
 
-    app.get("/users", async (req, res) => {
-      console.log("GET /users called with search query:", req.query.search);
-      const search = req.query.search;
-      const query = search ? { name: { $regex: search, $options: "i" } } : {};
+    // ✅ GET /users with pagination, search, and premiumRequested
+    app.get("/users", verifyFBToken, verifyAdmin, async (req, res) => {
+      console.log("GET /users called");
 
-      const users = await UsersCollection.find(query).toArray();
+      try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const search = req.query.search || "";
 
-      // Optional: profile collection theke premiumRequested state add kora
-      const updatedUsers = await Promise.all(
-        users.map(async (user) => {
-          const profile = await ProfileCollection.findOne({
-            contactEmail: user.email,
-          });
-          return {
-            ...user,
-            premiumRequested: profile?.premiumRequested || false,
-          };
-        })
-      );
+        const skip = (page - 1) * limit;
 
-      console.log(`Sending ${updatedUsers.length} users`);
-      res.send(updatedUsers);
+        // Filter: Search by name or email (case insensitive)
+        const query = {
+          $or: [
+            { name: { $regex: search, $options: "i" } },
+            { email: { $regex: search, $options: "i" } },
+          ],
+        };
+
+        const total = await UsersCollection.countDocuments(query);
+
+        const users = await UsersCollection.find(query)
+          .skip(skip)
+          .limit(limit)
+          .toArray();
+
+        // Attach premiumRequested flag from profile collection
+        const updatedUsers = await Promise.all(
+          users.map(async (user) => {
+            const profile = await ProfileCollection.findOne({
+              contactEmail: user.email,
+            });
+            return {
+              ...user,
+              premiumRequested: profile?.premiumRequested || false,
+            };
+          })
+        );
+
+        res.json({
+          total,
+          page,
+          limit,
+          totalPages: Math.ceil(total / limit),
+          data: updatedUsers,
+        });
+      } catch (error) {
+        console.error("GET /users error:", error.message);
+        res.status(500).json({ message: "Failed to fetch users" });
+      }
     });
 
     // GET /users/role/:email
@@ -361,11 +414,22 @@ async function run() {
     // --- Dashboard and Admin Stats ---
 
     // GET /dashboard/approvedPremium  --> **Protected**
+
     app.get("/dashboard/approvedPremium", verifyFBToken, async (req, res) => {
       console.log("GET /dashboard/approvedPremium called");
+
       try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const skip = (page - 1) * limit;
+
+        const matchStage = { premiumRequested: true };
+
+        const total = await ProfileCollection.countDocuments(matchStage);
+
+        // Aggregation pipeline with pagination
         const result = await ProfileCollection.aggregate([
-          { $match: { premiumRequested: true } },
+          { $match: matchStage },
           {
             $lookup: {
               from: "users",
@@ -383,10 +447,19 @@ async function run() {
               biodataId: 1,
             },
           },
-        ])
-          .limit(50)
-          .toArray();
-        res.send(result);
+          { $skip: skip },
+          { $limit: limit },
+        ]).toArray();
+
+        const totalPages = Math.ceil(total / limit);
+
+        res.json({
+          data: result,
+          total,
+          page,
+          limit,
+          totalPages,
+        });
       } catch (err) {
         console.error("❌ Error in approvedPremium route:", err.message);
         res.status(500).send({ message: "Server Error" });
@@ -431,6 +504,96 @@ async function run() {
 
     // --- Contact Requests ---
 
+    app.get(
+      "/contact-requests",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const page = parseInt(req.query.page) || 1;
+          const limit = parseInt(req.query.limit) || 10;
+          const skip = (page - 1) * limit;
+
+          const total = await ContactRequestCollection.countDocuments();
+          const requests = await ContactRequestCollection.find()
+            .sort({ requestedAt: -1 }) // যদি requestedAt না থাকে, _id এর descending ব্যবহার করতে পারো
+            .skip(skip)
+            .limit(limit)
+            .toArray();
+
+          res.json({
+            total,
+            page,
+            limit,
+            totalPages: Math.ceil(total / limit),
+            data: requests, // এখানে অবশ্যই data নামে অ্যারে দিতে হবে
+          });
+        } catch (err) {
+          console.error(err);
+          res.status(500).json({ error: "Failed to fetch contact requests" });
+        }
+      }
+    );
+
+    // GET /contact-requests/:email  --> **Protected**
+    app.get("/contact-requests/:email", verifyFBToken, async (req, res) => {
+      console.log(
+        "GET /contact-requests/:email called with email:",
+        req.params.email
+      );
+
+      const userEmail = req.params.email;
+      const page = parseInt(req.query.page) || 1;
+      const limit = parseInt(req.query.limit) || 10;
+      const skip = (page - 1) * limit;
+
+      try {
+        // Count total contact requests for this user
+        const total = await ContactRequestCollection.countDocuments({
+          userEmail,
+        });
+
+        // Aggregate with lookup, unwind, project, and pagination
+        const requests = await ContactRequestCollection.aggregate([
+          { $match: { userEmail } },
+          {
+            $lookup: {
+              from: "profile",
+              localField: "biodataId",
+              foreignField: "biodataId",
+              as: "profileData",
+            },
+          },
+          {
+            $unwind: { path: "$profileData", preserveNullAndEmptyArrays: true },
+          },
+          {
+            $project: {
+              _id: 1,
+              biodataId: 1,
+              status: 1,
+              name: "$profileData.name",
+              mobileNumber: "$profileData.mobileNumber",
+              contactEmail: "$profileData.contactEmail",
+            },
+          },
+          { $skip: skip },
+          { $limit: limit },
+        ]).toArray();
+
+        res.json({
+          data: requests,
+          total,
+          page,
+          limit,
+          totalPages: Math.ceil(total / limit),
+        });
+      } catch (error) {
+        console.error("Error fetching contact requests:", error);
+        res.status(500).json({ error: "Failed to fetch contact requests" });
+      }
+    });
+
     // POST /contact-requests  --> **Protected**
     app.post("/contact-requests", verifyFBToken, async (req, res) => {
       console.log("POST /contact-requests called with body:", req.body);
@@ -463,37 +626,33 @@ async function run() {
       res.json(result);
     });
 
-    // GET /contact-requests/:email  --> **Protected**
-    app.get("/contact-requests/:email", verifyFBToken, async (req, res) => {
-      console.log(
-        "GET /contact-requests/:email called with email:",
-        req.params.email
-      );
-      const userEmail = req.params.email;
-      const requests = await ContactRequestCollection.aggregate([
-        { $match: { userEmail } },
-        {
-          $lookup: {
-            from: "profile",
-            localField: "biodataId",
-            foreignField: "biodataId",
-            as: "profileData",
-          },
-        },
-        { $unwind: { path: "$profileData", preserveNullAndEmptyArrays: true } },
-        {
-          $project: {
-            _id: 1,
-            biodataId: 1,
-            status: 1,
-            name: "$profileData.name",
-            mobileNumber: "$profileData.mobileNumber",
-            contactEmail: "$profileData.contactEmail",
-          },
-        },
-      ]).toArray();
-      res.json(requests);
-    });
+    // Approve contact request
+    app.patch(
+      "/contact-requests/approve/:id",
+      verifyFBToken,
+      verifyAdmin,
+      async (req, res) => {
+        const id = req.params.id;
+
+        try {
+          const result = await ContactRequestCollection.updateOne(
+            { _id: new ObjectId(id) },
+            { $set: { status: "approved" } }
+          );
+
+          if (result.modifiedCount === 0) {
+            return res
+              .status(404)
+              .json({ error: "Request not found or already approved" });
+          }
+
+          res.json({ success: true, message: "Contact request approved" });
+        } catch (error) {
+          console.error("Error approving contact request:", error);
+          res.status(500).json({ error: "Internal Server Error" });
+        }
+      }
+    );
 
     // DELETE /contact-requests/:id  --> **Protected**
     app.delete("/contact-requests/:id", verifyFBToken, async (req, res) => {
