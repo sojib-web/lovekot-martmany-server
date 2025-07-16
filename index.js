@@ -771,31 +771,47 @@ async function run() {
 
     // POST /api/success-stories  --> **Protected**
     app.post("/api/success-stories", async (req, res) => {
-      console.log("POST /api/success-stories called with body:", req.body);
-      const { coupleImage, marriageDate, rating, successStory } = req.body;
-      if (!coupleImage || !marriageDate || !rating || !successStory) {
-        console.log("Missing required fields for success story");
-        return res.status(400).json({ error: "Missing required fields" });
+      const {
+        selfBiodataId,
+        partnerBiodataId,
+        coupleImage,
+        successStory,
+        marriedDate,
+        rating,
+      } = req.body;
+
+      // Validate all required fields
+      if (
+        !selfBiodataId ||
+        !partnerBiodataId ||
+        !coupleImage ||
+        !successStory ||
+        !marriedDate ||
+        rating === undefined
+      ) {
+        return res.status(400).json({ error: "All fields are required" });
       }
 
-      const newSuccessStory = {
+      // Create document with proper data types
+      const storyDoc = {
+        selfBiodataId: parseInt(selfBiodataId),
+        partnerBiodataId: parseInt(partnerBiodataId),
         coupleImage,
-        marriageDate: new Date(marriageDate),
-        rating,
         successStory,
+        marriedDate: new Date(marriedDate), // Date object
+        rating: Number(rating), // Number (1-5)
+        createdAt: new Date(),
       };
 
-      const result = await SuccessStories.insertOne(newSuccessStory);
-      if (result.insertedId) {
-        console.log("Success story created with id:", result.insertedId);
+      try {
+        const result = await SuccessStories.insertOne(storyDoc);
         res.status(201).json({
-          message: "Success story created successfully!",
-          successStory: newSuccessStory,
+          message: "Success story submitted!",
           insertedId: result.insertedId,
         });
-      } else {
-        console.log("Failed to create success story");
-        res.status(500).json({ error: "Failed to create success story" });
+      } catch (error) {
+        console.error("Error submitting story:", error);
+        res.status(500).json({ error: "Server error" });
       }
     });
 
