@@ -9,3 +9,4 @@ node_modules/
 
 # Firebase credentials file (if separated)
 config/loveknot-verifyFBToken.json
+.vercel

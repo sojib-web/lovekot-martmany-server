@@ -45,14 +45,13 @@ let SuccessStories,
 const verifyFBToken = async (req, res, next) => {
   const authorization = req.headers.authorization;
   if (!authorization) {
-    console.log("⛔ No Authorization header");
     return res.status(401).send({ message: "Unauthorized" });
   }
 
   const token = authorization.split(" ")[1];
   try {
     const decoded = await admin.auth().verifyIdToken(token);
-    console.log("✅ Token verified for uid:", decoded.uid);
+
     req.decoded = decoded;
     next();
   } catch (error) {
@@ -104,7 +103,7 @@ async function getPaginatedData(collection, req, res, query = {}) {
 
 async function run() {
   try {
-    await client.connect();
+    // await client.connect();
 
     const db = client.db("matrimonyBD");
     ProfileCollection = db.collection("profile");
@@ -114,22 +113,19 @@ async function run() {
     ContactRequestCollection = db.collection("contactRequests");
 
     await client.db("admin").command({ ping: 1 });
-    console.log("✅ MongoDB connected successfully!");
 
     // --- User Routes ---
 
     app.post("/users", async (req, res) => {
-      console.log("POST /users called with body:", req.body);
       const userData = req.body;
       const existingUser = await UsersCollection.findOne({
         email: userData.email.toLowerCase(),
       });
       if (existingUser) {
-        console.log(`User already exists: ${userData.email}`);
         return res.status(400).json({ message: "User already exists" });
       }
       const result = await UsersCollection.insertOne(userData);
-      console.log("User created with id:", result.insertedId);
+
       res.status(201).json({
         message: "✅ User created successfully",
         insertedId: result.insertedId,
@@ -138,8 +134,6 @@ async function run() {
 
     // ✅ GET /users with pagination, search, and premiumRequested
     app.get("/users", verifyFBToken, verifyAdmin, async (req, res) => {
-      console.log("GET /users called");
-
       try {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 10;
@@ -222,13 +216,13 @@ async function run() {
       verifyAdmin,
       async (req, res) => {
         const id = req.params.id;
-        console.log(`PATCH /users/${id}/make-admin called`);
+
         try {
           const result = await UsersCollection.updateOne(
             { _id: new ObjectId(id) },
             { $set: { role: "admin" } }
           );
-          console.log("User role updated:", result.modifiedCount);
+
           res.json({
             message: "User role updated to admin",
             modifiedCount: result.modifiedCount,
@@ -247,19 +241,17 @@ async function run() {
       verifyAdmin,
       async (req, res) => {
         const userId = req.params.id;
-        console.log(`PATCH /users/${userId}/make-premium called`);
+
         try {
           const user = await UsersCollection.findOne({
             _id: new ObjectId(userId),
           });
           if (!user) {
-            console.log(`User not found: ${userId}`);
             return res.status(404).json({ message: "User not found" });
           }
 
           // Check if user is already premium
           if (user.role === "premium") {
-            console.log(`User ${user.email} is already premium`);
             return res.status(400).json({ message: "User is already premium" });
           }
 
@@ -267,9 +259,6 @@ async function run() {
             contactEmail: user.email,
           });
           if (!profile || profile.premiumRequested !== true) {
-            console.log(
-              `Premium not requested or profile missing for user: ${user.email}`
-            );
             return res.status(400).json({
               message: "User's profile has not requested premium",
             });
@@ -284,7 +273,6 @@ async function run() {
             { $set: { premiumApproved: true } }
           );
 
-          console.log(`User ${user.email} made premium successfully`);
           res.json({ message: "User has been made premium successfully" });
         } catch (err) {
           console.error("🔥 Error making user premium:", err);
@@ -297,7 +285,6 @@ async function run() {
 
     // POST /profile  --> **Protected**
     app.post("/profile", verifyFBToken, async (req, res) => {
-      console.log("POST /profile called with data:", req.body);
       const data = req.body;
       const lastData = await ProfileCollection.find()
         .sort({ biodataId: -1 })
@@ -306,7 +293,7 @@ async function run() {
       const lastId = lastData[0]?.biodataId || 0;
       data.biodataId = lastId + 1;
       const result = await ProfileCollection.insertOne(data);
-      console.log("Biodata created with id:", result.insertedId);
+
       res.status(201).json({
         message: "✅ Biodata created successfully",
         insertedId: result.insertedId,
@@ -320,35 +307,31 @@ async function run() {
       verifyFBToken,
       async (req, res) => {
         const id = req.params.id;
-        console.log(`PATCH /profile/premium-request/${id} called`);
+
         const result = await ProfileCollection.updateOne(
           { _id: new ObjectId(id) },
           { $set: { premiumRequested: true } }
         );
-        console.log("Premium requested flag updated:", result.modifiedCount);
+
         res.send(result);
       }
     );
 
     app.get("/profile/:email", async (req, res) => {
-      console.log("GET /profile/:email called with email:", req.params.email);
       const email = req.params.email;
       const biodata = await ProfileCollection.findOne({ contactEmail: email });
       if (!biodata) {
-        console.log(`Biodata not found for email: ${email}`);
         return res.status(404).json({ message: "Biodata not found" });
       }
       res.json(biodata);
     });
 
     app.get("/profiles", async (req, res) => {
-      console.log("GET /profiles called");
       const profiles = await ProfileCollection.find().toArray();
       res.json(profiles);
     });
 
     app.get("/biodata", async (req, res) => {
-      console.log("GET /biodata called with query:", req.query);
       const { type } = req.query;
       const query = type
         ? { type: { $regex: new RegExp(`^${type}$`, "i") } }
@@ -377,7 +360,6 @@ async function run() {
     });
 
     app.get("/biodata-by-id/:id", async (req, res) => {
-      console.log("GET /biodata-by-id/:id called with id:", req.params.id);
       const id = parseInt(req.params.id);
       const result = await ProfileCollection.findOne({ biodataId: id });
       res.send(result);
@@ -416,8 +398,6 @@ async function run() {
     // GET /dashboard/approvedPremium  --> **Protected**
 
     app.get("/dashboard/approvedPremium", verifyFBToken, async (req, res) => {
-      console.log("GET /dashboard/approvedPremium called");
-
       try {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 10;
@@ -468,7 +448,6 @@ async function run() {
 
     // GET /admin-dashboard/stats  --> **Protected**
     app.get("/admin-dashboard/stats", verifyFBToken, async (req, res) => {
-      console.log("GET /admin-dashboard/stats called");
       try {
         const totalBiodata = await ProfileCollection.countDocuments();
         const maleCount = await ProfileCollection.countDocuments({
@@ -537,11 +516,6 @@ async function run() {
 
     // GET /contact-requests/:email  --> **Protected**
     app.get("/contact-requests/:email", verifyFBToken, async (req, res) => {
-      console.log(
-        "GET /contact-requests/:email called with email:",
-        req.params.email
-      );
-
       const userEmail = req.params.email;
       const page = parseInt(req.query.page) || 1;
       const limit = parseInt(req.query.limit) || 10;
@@ -596,16 +570,11 @@ async function run() {
 
     // POST /contact-requests  --> **Protected**
     app.post("/contact-requests", verifyFBToken, async (req, res) => {
-      console.log("POST /contact-requests called with body:", req.body);
       const { userEmail, biodataId, transactionId, amountPaid } = req.body;
       const profileDoc = await ProfileCollection.findOne({
         _id: new ObjectId(biodataId),
       });
       if (!profileDoc) {
-        console.log(
-          "Biodata not found for contact request, biodataId:",
-          biodataId
-        );
         return res.status(404).json({ error: "Biodata not found" });
       }
 
@@ -622,7 +591,7 @@ async function run() {
       };
 
       const result = await ContactRequestCollection.insertOne(newRequest);
-      console.log("Contact request created with id:", result.insertedId);
+
       res.json(result);
     });
 
@@ -656,15 +625,11 @@ async function run() {
 
     // DELETE /contact-requests/:id  --> **Protected**
     app.delete("/contact-requests/:id", verifyFBToken, async (req, res) => {
-      console.log(
-        "DELETE /contact-requests/:id called with id:",
-        req.params.id
-      );
       const id = req.params.id;
       const result = await ContactRequestCollection.deleteOne({
         _id: new ObjectId(id),
       });
-      console.log("Contact request deleted count:", result.deletedCount);
+
       res.send(result);
     });
 
@@ -730,12 +695,11 @@ async function run() {
     });
     // DELETE /favourites/:id  --> **Protected**
     app.delete("/favourites/:id", verifyFBToken, async (req, res) => {
-      console.log("DELETE /favourites/:id called with id:", req.params.id);
       const id = req.params.id;
       const result = await FavouritesCollection.deleteOne({
         _id: new ObjectId(id),
       });
-      console.log("Favourite deleted count:", result.deletedCount);
+
       res.send(result);
     });
 
@@ -743,7 +707,6 @@ async function run() {
 
     // POST /create-payment-intent  --> **Protected** (Optional but recommended)
     app.post("/create-payment-intent", verifyFBToken, async (req, res) => {
-      console.log("POST /create-payment-intent called with body:", req.body);
       const { amount } = req.body;
       try {
         const paymentIntent = await stripe.paymentIntents.create({
@@ -751,7 +714,7 @@ async function run() {
           currency: "usd",
           payment_method_types: ["card"],
         });
-        console.log("Stripe payment intent created");
+
         res.send({ clientSecret: paymentIntent.client_secret });
       } catch (err) {
         console.error("Stripe error:", err);
@@ -762,7 +725,6 @@ async function run() {
     // --- Success Stories ---
 
     app.get("/api/success-stories", async (req, res) => {
-      console.log("GET /api/success-stories called");
       const successStories = await SuccessStories.find()
         .sort({ marriageDate: -1 })
         .toArray();
@@ -819,8 +781,6 @@ async function run() {
 
     app.get("/api/success-counter", async (req, res) => {
       try {
-        console.log("📊 GET /api/success-counter called");
-
         const totalProfiles = await ProfileCollection.estimatedDocumentCount();
 
         const boysCount = await ProfileCollection.countDocuments({
