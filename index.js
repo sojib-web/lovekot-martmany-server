@@ -103,8 +103,6 @@ async function getPaginatedData(collection, req, res, query = {}) {
 
 async function run() {
   try {
-    // await client.connect();
-
     const db = client.db("matrimonyBD");
     ProfileCollection = db.collection("profile");
     SuccessStories = db.collection("SuccessStories");
@@ -208,28 +206,68 @@ async function run() {
         res.status(500).json({ message: "Server error" });
       }
     });
+    // PUT /api/users/:email
+    app.put("/users/:email", async (req, res) => {
+      const { email } = req.params;
+      const { name, photoURL } = req.body;
+
+      try {
+        const user = await UsersCollection.updateOne(
+          { email },
+          { $set: { name, photoURL } }
+        );
+        res.status(200).json({ message: "User updated", user });
+      } catch (err) {
+        res
+          .status(500)
+          .json({ message: "Failed to update user", error: err.message });
+      }
+    });
 
     // PATCH /users/:id/make-admin  --> **Protected**
     app.patch(
-      "/users/:id/make-admin",
+      "/users/:id/make-premium",
       verifyFBToken,
       verifyAdmin,
       async (req, res) => {
-        const id = req.params.id;
+        const userId = req.params.id;
 
         try {
-          const result = await UsersCollection.updateOne(
-            { _id: new ObjectId(id) },
-            { $set: { role: "admin" } }
+          const user = await UsersCollection.findOne({
+            _id: new ObjectId(userId),
+          });
+          if (!user) {
+            return res.status(404).json({ message: "User not found" });
+          }
+
+          if (user.role === "premium") {
+            return res.status(400).json({ message: "User is already premium" });
+          }
+
+          const profile = await ProfileCollection.findOne({
+            contactEmail: user.email,
+          });
+
+          if (!profile || profile.premiumRequested !== true) {
+            return res
+              .status(400)
+              .json({ message: "User's profile has not requested premium" });
+          }
+
+          await UsersCollection.updateOne(
+            { _id: new ObjectId(userId) },
+            { $set: { role: "premium" } }
           );
 
-          res.json({
-            message: "User role updated to admin",
-            modifiedCount: result.modifiedCount,
-          });
-        } catch (error) {
-          console.error("❌ Error updating role:", error);
-          res.status(500).json({ message: "Failed to update role" });
+          await ProfileCollection.updateOne(
+            { contactEmail: user.email },
+            { $set: { premiumApproved: true } }
+          );
+
+          res.json({ message: "User has been made premium successfully" });
+        } catch (err) {
+          console.error("🔥 Error making user premium:", err);
+          res.status(500).json({ message: "Internal server error" });
         }
       }
     );
@@ -407,7 +445,6 @@ async function run() {
 
         const total = await ProfileCollection.countDocuments(matchStage);
 
-        // Aggregation pipeline with pagination
         const result = await ProfileCollection.aggregate([
           { $match: matchStage },
           {
@@ -442,7 +479,7 @@ async function run() {
         });
       } catch (err) {
         console.error("❌ Error in approvedPremium route:", err.message);
-        res.status(500).send({ message: "Server Error" });
+        res.status(500).json({ message: "Server Error" });
       }
     });
 
