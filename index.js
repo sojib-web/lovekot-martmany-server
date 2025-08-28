@@ -224,54 +224,6 @@ async function run() {
       }
     });
 
-    // PATCH /users/:id/make-admin  --> **Protected**
-    app.patch(
-      "/users/:id/make-premium",
-      verifyFBToken,
-      verifyAdmin,
-      async (req, res) => {
-        const userId = req.params.id;
-
-        try {
-          const user = await UsersCollection.findOne({
-            _id: new ObjectId(userId),
-          });
-          if (!user) {
-            return res.status(404).json({ message: "User not found" });
-          }
-
-          if (user.role === "premium") {
-            return res.status(400).json({ message: "User is already premium" });
-          }
-
-          const profile = await ProfileCollection.findOne({
-            contactEmail: user.email,
-          });
-
-          if (!profile || profile.premiumRequested !== true) {
-            return res
-              .status(400)
-              .json({ message: "User's profile has not requested premium" });
-          }
-
-          await UsersCollection.updateOne(
-            { _id: new ObjectId(userId) },
-            { $set: { role: "premium" } }
-          );
-
-          await ProfileCollection.updateOne(
-            { contactEmail: user.email },
-            { $set: { premiumApproved: true } }
-          );
-
-          res.json({ message: "User has been made premium successfully" });
-        } catch (err) {
-          console.error("🔥 Error making user premium:", err);
-          res.status(500).json({ message: "Internal server error" });
-        }
-      }
-    );
-
     // PATCH /users/:id/make-premium  --> **Protected**
     app.patch(
       "/users/:id/make-premium",
@@ -834,6 +786,45 @@ async function run() {
       } catch (err) {
         console.error("❌ Error in success-counter:", err.message);
         res.status(500).json({ message: "Server Error" });
+      }
+    });
+
+    // GET /api/my-matches  --> Fetch matches for the logged-in user (temporarily unprotected)
+    app.get("/api/my-matches", async (req, res) => {
+      const userEmail = req.query.email; // now using query param instead of token
+
+      if (!userEmail) {
+        return res
+          .status(400)
+          .json({ message: "Email query parameter is required" });
+      }
+
+      try {
+        // Step 1: Fetch current user's profile
+        const userProfile = await ProfileCollection.findOne({
+          contactEmail: userEmail,
+        });
+        if (!userProfile) {
+          return res.status(404).json({ message: "Your profile not found" });
+        }
+
+        // Step 2: Fetch all other profiles except the current user
+        const matches = await ProfileCollection.find({
+          contactEmail: { $ne: userEmail },
+        })
+          .limit(20)
+          .toArray();
+
+        // Step 3: Mark premium profiles
+        const formattedMatches = matches.map((match) => ({
+          ...match,
+          premium: match.premiumApproved || false,
+        }));
+
+        res.json(formattedMatches);
+      } catch (err) {
+        console.error("❌ Error fetching matches:", err.message);
+        res.status(500).json({ message: "Failed to fetch matches" });
       }
     });
 
